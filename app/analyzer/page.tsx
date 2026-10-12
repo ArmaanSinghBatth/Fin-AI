@@ -7,107 +7,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 
-// --- TYPE DEFINITIONS ---
 interface Transaction {
-    date: string; // YYYY-MM-DD format
+    date: string;
     description: string;
-    amount: number; // Positive for debits/expenses, negative for credits/income
+    amount: number;
     category: string;
 }
 
-interface RechartsSchemaProperty {
-    type: 'STRING' | 'NUMBER' | 'OBJECT' | 'ARRAY';
-    description: string;
-    properties?: Record<string, RechartsSchemaProperty>;
-    required?: string[];
-    propertyOrdering?: string[];
-    items?: RechartsSchemaProperty;
-}
-
-// --- API Configuration ---
-const API_KEY: string = process.env.NEXT_PUBLIC_GEMINI_API_KEY || ""; // Overwriting key as required by instructions
-const MODEL_NAME: string = "gemini-2.5-flash-preview-09-2025";
-const API_URL: string = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${API_KEY}`;
-
-// --- JSON Response Schema Definition ---
-const transactionSchema: RechartsSchemaProperty = {
-    type: "ARRAY",
-    description: "A list of all financial transactions extracted from the bank statement.",
-    items: {
-        type: "OBJECT",
-        properties: {
-            date: { type: "STRING", description: "The date of the transaction in YYYY-MM-DD format (e.g., 2024-03-15)." },
-            description: { type: "STRING", description: "A brief description of the transaction as it appears on the statement." },
-            amount: { type: "NUMBER", description: "The monetary amount of the transaction. Use a positive number for debits/expenses and a negative number for credits/income (Salary, Refunds, etc.)." },
-            category: { type: "STRING", description: "A broad category (e.g., 'Groceries', 'Rent', 'Salary', 'Transfer', 'Utilities', 'Dining', 'Shopping', 'Other')." }
-        },
-        required: ["date", "description", "amount", "category"],
-        propertyOrdering: ["date", "description", "amount", "category"]
-    }
-};
-
-// --- Utility Functions ---
-
-/**
- * Converts a File object (PDF) to a Base64 string.
- * @param {File} file - The file to convert.
- * @returns {Promise<{base64: string, mimeType: string}>}
- */
-const fileToBase64 = (file: File): Promise<{ base64: string, mimeType: string }> => {
-    return new Promise((resolve, reject) => {
-        if (!file) return reject(new Error("No file provided."));
-        const reader = new FileReader();
-        reader.onload = () => {
-            if (typeof reader.result !== 'string') return reject(new Error("Failed to read file as string."));
-            const base64String = reader.result.split(',')[1];
-            resolve({ base64: base64String, mimeType: file.type });
-        };
-        reader.onerror = (error) => reject(error);
-        reader.readAsDataURL(file);
-    });
-};
-
-
-/**
- * Executes the API call with exponential backoff retry mechanism.
- */
-async function callApiWithBackoff(payload: Record<string, any>, maxRetries: number = 5): Promise<Record<string, any>> {
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-        try {
-            const response = await fetch(API_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-
-            if (response.status === 429) { // Rate limit
-                const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
-                if (attempt < maxRetries - 1) {
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                    continue; 
-                } else {
-                    throw new Error("API rate limit exceeded after multiple retries.");
-                }
-            }
-
-            if (!response.ok) {
-                const errorBody = await response.text();
-                throw new Error(`API call failed with status ${response.status}: ${errorBody}`);
-            }
-
-            return await response.json();
-
-        } catch (error) {
-            if (attempt === maxRetries - 1) {
-                throw error;
-            }
-            const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
-            await new Promise(resolve => setTimeout(resolve, delay));
-        }
-    }
-    // Should not be reached, but needed for TS compiler
-    throw new Error("Maximum API retries reached.");
-}
+const MAX_PDF_SIZE = 4 * 1024 * 1024;
 
 // --- React Components ---
 
@@ -269,17 +176,20 @@ const Page: React.FC = () => {
 
     const handleFileChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
         const selectedFile = event.target.files?.[0];
-        if (selectedFile && selectedFile.type === 'application/pdf') {
+        if (selectedFile && selectedFile.type === 'application/pdf' && selectedFile.size <= MAX_PDF_SIZE) {
             setFile(selectedFile);
             setTransactions([]);
             setError(null);
         } else {
             setFile(null);
-            // Clear the file input if an invalid file was selected
             if (event.target) {
                 event.target.value = '';
             }
-            setError("Please select a valid PDF file.");
+            setError(
+                selectedFile?.type !== 'application/pdf'
+                    ? "Please select a valid PDF file."
+                    : "PDF files must be 4 MB or smaller."
+            );
         }
     }, []);
 
@@ -294,45 +204,20 @@ const Page: React.FC = () => {
         setTransactions([]);
 
         try {
-            // STEP 1: Convert the PDF to Base64
-            const { base64, mimeType } = await fileToBase64(file);
+            const response = await fetch('/api/analyze', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/pdf' },
+                body: file,
+            });
+            const result: { transactions?: Transaction[]; error?: string } = await response.json();
 
-            const systemPrompt = "You are a world-class financial analysis bot specializing in HDFC bank statements. Your task is to analyze the provided PDF. Extract ALL transactions, including the date, a brief description, the monetary amount, and assign a broad category (e.g., 'Groceries', 'Rent', 'Salary', 'Transfer', 'Utilities', 'Dining', 'Shopping', 'Other'). Use positive amounts for expenses/debits and negative amounts for income/credits. Be precise with dates and amounts. Only return the final JSON array according to the specified schema, with no conversational text or markdown formatting outside of the JSON block.";
-            const userQuery = "Analyze the uploaded HDFC bank statement PDF. Extract all transactions and categorize them strictly following the required JSON schema.";
-
-            const payload = {
-                contents: [{
-                    parts: [
-                        { text: userQuery },
-                        { inlineData: { mimeType, data: base64 } }
-                    ]
-                }],
-                systemInstruction: {
-                    parts: [{ text: systemPrompt }]
-                },
-                generationConfig: { 
-                    responseMimeType: "application/json",
-                    responseSchema: transactionSchema,
-                },
-            };
-
-            // STEP 2: Send the Base64 content to the Gemini API
-            const result = await callApiWithBackoff(payload);
-
-            const jsonString = result?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-            if (!jsonString) {
-                throw new Error("API response was empty or malformed.");
+            if (!response.ok) {
+                throw new Error(result.error || `Analysis failed with status ${response.status}.`);
             }
-
-            // The model is forced to return JSON, so we parse it directly.
-            const parsedTransactions = JSON.parse(jsonString) as Transaction[];
-
-            if (Array.isArray(parsedTransactions)) {
-                setTransactions(parsedTransactions);
-            } else {
-                throw new Error("The API returned data in an incorrect format (expected an array).");
+            if (!Array.isArray(result.transactions)) {
+                throw new Error("The server returned an invalid transaction list.");
             }
+            setTransactions(result.transactions);
 
         } catch (err) {
             const error = err as Error;
@@ -360,7 +245,7 @@ const Page: React.FC = () => {
                             </Badge>
                             <CardTitle className="text-xl">Upload Statement</CardTitle>
                         </div>
-                        <CardDescription>Select a non-encrypted PDF financial statement to analyze</CardDescription>
+                        <CardDescription>Select a non-encrypted PDF financial statement (up to 4 MB) to analyze</CardDescription>
                     </CardHeader>
                     <CardContent>
                         <div className="flex justify-between items-center gap-4 flex-col md:flex-row">
