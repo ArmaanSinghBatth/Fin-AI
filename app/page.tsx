@@ -6,7 +6,6 @@ import { Upload, Loader, TrendingUp, DollarSign, XCircle, FileText, LayoutDashbo
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { useTransactions } from "@/components/transaction-context";
 
 // --- TYPE DEFINITIONS ---
 interface Transaction {
@@ -26,7 +25,7 @@ interface RechartsSchemaProperty {
 }
 
 // --- API Configuration ---
-const API_KEY: string = "AIzaSyDSAYkfWb7cdgJ6R6KARQAIekcm6D_OeaA"; // Overwriting key as required by instructions
+const API_KEY: string = process.env.NEXT_PUBLIC_GEMINI_API_KEY || ""; // Overwriting key as required by instructions
 const MODEL_NAME: string = "gemini-2.5-flash-preview-09-2025";
 const API_URL: string = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${API_KEY}`;
 
@@ -267,14 +266,12 @@ const Page: React.FC = () => {
     const [transactions, setTransactions] = useState<Transaction[]>([]);
     const [loading, setLoading] = useState<boolean>(false);
     const [error, setError] = useState<string | null>(null);
-    const { setTransactions: setSharedTransactions } = useTransactions();
 
     const handleFileChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
         const selectedFile = event.target.files?.[0];
         if (selectedFile && selectedFile.type === 'application/pdf') {
             setFile(selectedFile);
             setTransactions([]);
-            setSharedTransactions([]);
             setError(null);
         } else {
             setFile(null);
@@ -284,7 +281,7 @@ const Page: React.FC = () => {
             }
             setError("Please select a valid PDF file.");
         }
-    }, [setSharedTransactions]);
+    }, []);
 
     const analyzeStatement = useCallback(async () => {
         if (!file) {
@@ -295,7 +292,6 @@ const Page: React.FC = () => {
         setLoading(true);
         setError(null);
         setTransactions([]);
-        setSharedTransactions([]);
 
         try {
             // STEP 1: Convert the PDF to Base64
@@ -334,7 +330,6 @@ const Page: React.FC = () => {
 
             if (Array.isArray(parsedTransactions)) {
                 setTransactions(parsedTransactions);
-                setSharedTransactions(parsedTransactions);
             } else {
                 throw new Error("The API returned data in an incorrect format (expected an array).");
             }
@@ -346,7 +341,7 @@ const Page: React.FC = () => {
         } finally {
             setLoading(false);
         }
-    }, [file, setSharedTransactions]);
+    }, [file]);
     
     const summaryComponent = DashboardSummary({ transactions });
 
